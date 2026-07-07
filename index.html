@@ -113,6 +113,34 @@ button:active { transform: scale(.96); }
   font-size: 12px;
   font-weight: 700;
 }
+.space-switch {
+  display: flex;
+  gap: 4px;
+  margin: 12px 20px 0;
+  background: var(--surface-2);
+  border-radius: 99px;
+  padding: 3px;
+  max-width: 300px;
+}
+.space-switch button {
+  flex: 1;
+  padding: 6px 0;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  color: var(--ink-2);
+}
+.space-switch button.on {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 4px rgba(46,42,37,.12);
+}
+.chip.space {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
 main {
   flex: 1;
   padding: 4px 20px 170px; /* 下部バー分の余白 */
@@ -687,6 +715,12 @@ noscript { display: block; padding: 40px 20px; text-align: center; }
     <button class="theme-btn" id="themeBtn" aria-label="テーマ切替"></button>
   </header>
 
+  <div class="space-switch" id="spaceSwitch" role="group" aria-label="表示する範囲">
+    <button data-space="all">ぜんぶ</button>
+    <button data-space="jibun">じぶん</button>
+    <button data-space="shigoto">しごと</button>
+  </div>
+
   <main>
     <!-- ===== 今日 ===== -->
     <section class="view active" id="view-today" role="tabpanel" aria-labelledby="tab-today">
@@ -777,18 +811,25 @@ function fmtDueChip(due) {
    ============================================================ */
 const STORE_KEY = "kyouyaru.data";
 const BACKUP_KEY = "kyouyaru.data.backup";
-const SCHEMA_VERSION = 1;
-// 将来スキーマを上げるときは { 2: (d) => {...変換して返す} } を追加する
-const MIGRATIONS = {};
+const SCHEMA_VERSION = 2;
+// スキーマを上げるときは { バージョン: (d) => {...変換して返す} } を追加する
+const MIGRATIONS = {
+  // v2: じぶん/しごとスペースの導入。既存タスクはすべて「じぶん」
+  2: (d) => {
+    (d.tasks || []).forEach((t) => { if (!t.space) t.space = "jibun"; });
+    return d;
+  },
+};
 
 function freshData() {
   return {
     schemaVersion: SCHEMA_VERSION,
     tasks: [],
-    settings: { theme: "system" },
+    settings: { theme: "system", spaceFilter: "all" },
     stats: { daily: {}, bestStreak: 0 },
   };
 }
+let migratedOnLoad = false;
 function load() {
   const raw = localStorage.getItem(STORE_KEY);
   if (!raw) return freshData();
@@ -798,8 +839,9 @@ function load() {
     for (let v = (d.schemaVersion || 1) + 1; v <= SCHEMA_VERSION; v++) {
       if (MIGRATIONS[v]) d = MIGRATIONS[v](d);
       d.schemaVersion = v;
+      migratedOnLoad = true;
     }
-    d.settings = Object.assign({ theme: "system" }, d.settings);
+    d.settings = Object.assign({ theme: "system", spaceFilter: "all" }, d.settings);
     d.stats = Object.assign({ daily: {}, bestStreak: 0 }, d.stats);
     return d;
   } catch (e) {
@@ -811,6 +853,7 @@ function load() {
 }
 let data = load();
 function save() { localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+if (migratedOnLoad) save(); // 移行結果を書き戻す（次回以降は再移行しない）
 
 function pruneOldDaily() {
   const limit = keyOffset(todayKey(), -370);
@@ -836,6 +879,7 @@ function addTask(title, opts = {}) {
     due: opts.due || null,
     priority: opts.priority ?? 1,
     tags: opts.tags || [],
+    space: opts.space || (data.settings.spaceFilter === "shigoto" ? "shigoto" : "jibun"),
     today: !!opts.today,
     todayDate: opts.today ? todayKey() : null,
     order: nextOrder(),
@@ -919,6 +963,11 @@ function currentStreak() {
 /* ============================================================
    === 集合ロジック（今日ビュー） ===============================
    ============================================================ */
+function spaceOf(t) { return t.space || "jibun"; }
+function inSpace(t) {
+  const f = data.settings.spaceFilter;
+  return f === "all" || spaceOf(t) === f;
+}
 function isTodayTask(t) {
   const k = todayKey();
   return !t.completedAt && ((t.due === k) || (t.today && t.todayDate === k));
@@ -981,6 +1030,9 @@ function taskRow(t, ctx) {
   if (t.priority === 2) meta.appendChild(el("span", "chip p-high", "高"));
   if (t.priority === 0) meta.appendChild(el("span", "chip p-low", "低"));
   t.tags.forEach((tag) => meta.appendChild(el("span", "chip tag", tag)));
+  if (data.settings.spaceFilter === "all" && spaceOf(t) === "shigoto") {
+    meta.appendChild(el("span", "chip space", "しごと"));
+  }
   if (meta.children.length) body.appendChild(meta);
   body.addEventListener("click", () => openSheet(t.id));
   li.appendChild(body);
@@ -1015,7 +1067,7 @@ function onToggleComplete(id, row) {
     return;
   }
   const wasLastToday = (state.view === "today") &&
-    (data.tasks.filter((x) => isTodayTask(x) || isCarryOver(x)).length === 1);
+    (data.tasks.filter((x) => (isTodayTask(x) || isCarryOver(x)) && inSpace(x)).length === 1);
   completeTask(id);
   const finish = () => {
     renderAll();
@@ -1066,9 +1118,9 @@ function renderToday() {
   $("#heroDate").append(sep, String(d.getDate()));
   $("#heroWd").textContent = WD[d.getDay()] + "曜日";
 
-  const todays = data.tasks.filter(isTodayTask).sort(byOrder);
-  const carry = data.tasks.filter(isCarryOver).sort(byOrder);
-  const doneToday = completedTodayTasks();
+  const todays = data.tasks.filter((t) => isTodayTask(t) && inSpace(t)).sort(byOrder);
+  const carry = data.tasks.filter((t) => isCarryOver(t) && inSpace(t)).sort(byOrder);
+  const doneToday = completedTodayTasks().filter(inSpace);
   const left = todays.length + carry.length;
 
   // ストリークバッジ
@@ -1183,8 +1235,8 @@ function renderAllView() {
   renderFilterRow();
   const host = $("#allContent");
   host.innerHTML = "";
-  const active = data.tasks.filter((t) => !t.completedAt).sort(byOrder);
-  const done = data.tasks.filter((t) => t.completedAt).sort((a, b) => b.completedAt - a.completedAt);
+  const active = data.tasks.filter((t) => !t.completedAt && inSpace(t)).sort(byOrder);
+  const done = data.tasks.filter((t) => t.completedAt && inSpace(t)).sort((a, b) => b.completedAt - a.completedAt);
   const filtered = active.filter(matchesFilter);
   const anyFilter = filter.q || filter.hasDue || filter.prio.size || filter.tags.size;
 
@@ -1475,6 +1527,20 @@ function openSheet(id) {
     segBtns.forEach((f) => f());
     body.appendChild(seg);
 
+    body.appendChild(mkLabel("所属"));
+    const spaceSeg = el("div", "seg");
+    let spaceSel = spaceOf(t);
+    const spaceBtns = [["じぶん", "jibun"], ["しごと", "shigoto"]].map(([lab, val]) => {
+      const b = el("button", "", lab);
+      b.type = "button";
+      const sync = () => { b.className = (spaceSel === val ? "on" : ""); };
+      b.addEventListener("click", () => { spaceSel = val; spaceBtns.forEach((f) => f()); });
+      spaceSeg.appendChild(b);
+      return sync;
+    });
+    spaceBtns.forEach((f) => f());
+    body.appendChild(spaceSeg);
+
     body.appendChild(mkLabel("タグ（読点・カンマ区切り）", "sheetTags"));
     const tags = el("input", "tags-input");
     tags.id = "sheetTags";
@@ -1526,6 +1592,7 @@ function openSheet(id) {
       t.title = v;
       t.due = due.value || null;
       t.priority = prio;
+      t.space = spaceSel;
       t.tags = parseTags(tags.value);
       if (todayOn !== isTodayTask(t)) setToday(t.id, todayOn);
       save();
@@ -1579,6 +1646,7 @@ function switchView(name) {
   document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.view === name)));
   const qa = $("#quickAdd");
   qa.style.display = name === "stats" ? "none" : "";
+  $("#spaceSwitch").style.display = name === "stats" ? "none" : "";
   $("#quickInput").placeholder = name === "today" ? "きょうやることを追加" : "タスクを追加";
   renderAll();
 }
@@ -1638,8 +1706,24 @@ function checkDayRollover() {
 setInterval(checkDayRollover, 60 * 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) checkDayRollover(); });
 
+function renderSpaceSwitch() {
+  document.querySelectorAll("#spaceSwitch button").forEach((b) => {
+    const on = b.dataset.space === data.settings.spaceFilter;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", String(on));
+  });
+}
+document.querySelectorAll("#spaceSwitch button").forEach((b) => {
+  b.addEventListener("click", () => {
+    data.settings.spaceFilter = b.dataset.space;
+    save();
+    renderAll();
+  });
+});
+
 function renderAll() {
   lastRenderedDay = todayKey();
+  renderSpaceSwitch();
   renderToday();
   if (state.view === "all") renderAllView();
   if (state.view === "stats") renderStats();
