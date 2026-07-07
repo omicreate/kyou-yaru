@@ -102,8 +102,6 @@ button:active { transform: scale(.96); }
   letter-spacing: .18em;
   color: var(--ink-2);
 }
-.appbar-actions { display: flex; align-items: center; gap: 6px; }
-.appbar-actions .theme-btn[hidden] { display: none; }
 .theme-btn {
   min-width: var(--tap); height: 36px;
   display: inline-flex; align-items: center; gap: 6px;
@@ -143,7 +141,8 @@ button:active { transform: scale(.96); }
   border: 1px solid var(--line);
   color: var(--ink-2);
 }
-.chip.repeat { background: var(--green-soft); color: var(--green); }
+/* 繰り返しは「属性」なので中立色（緑は「きょう」の期限チップ専用にして意味の衝突を避ける） */
+.chip.repeat { background: var(--surface-2); color: var(--ink-2); }
 main {
   flex: 1;
   padding: 4px 20px 170px; /* 下部バー分の余白 */
@@ -675,6 +674,24 @@ details.done-fold summary::marker { color: var(--line); }
 .today-switch.on .knob { background: var(--accent); }
 .today-switch.on .knob::after { left: 22px; }
 .sheet-tagchips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+details.sheet-more { margin-top: 16px; }
+details.sheet-more summary {
+  cursor: pointer;
+  -webkit-user-select: none; user-select: none;
+  list-style: none;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11.5px; font-weight: 800; letter-spacing: .08em;
+  color: var(--ink-2);
+  padding: 10px 2px;
+}
+details.sheet-more summary::-webkit-details-marker { display: none; }
+details.sheet-more summary::before { content: "▸"; color: var(--line); }
+details.sheet-more[open] summary::before { content: "▾"; }
+.sum-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.sum-chips .chip { font-size: 10.5px; letter-spacing: 0; }
+details.sheet-more[open] .sum-chips { display: none; } /* 開いている間は中身が見えるので要約は消す */
+.today-switch.locked { opacity: .45; pointer-events: none; }
+.due-input:disabled { opacity: .45; }
 .sheet-actions { display: flex; gap: 8px; margin-top: 22px; }
 .sheet-actions .save {
   flex: 1;
@@ -736,10 +753,7 @@ noscript { display: block; padding: 40px 20px; text-align: center; }
 <div id="app">
   <header class="appbar">
     <span class="brand">きょうやる</span>
-    <div class="appbar-actions">
-      <button class="theme-btn" id="notifyBtn" aria-label="通知の設定" hidden></button>
-      <button class="theme-btn" id="themeBtn" aria-label="テーマ切替"></button>
-    </div>
+    <button class="theme-btn" id="themeBtn" aria-label="テーマ切替"></button>
   </header>
 
   <div class="space-switch" id="spaceSwitch" role="group" aria-label="表示する範囲">
@@ -895,10 +909,7 @@ function load() {
   }
 }
 let data = load();
-function save() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(data));
-  writeNotifyDigest();
-}
+function save() { localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
 if (migratedOnLoad) save(); // 移行結果を書き戻す（次回以降は再移行しない）
 
 function pruneOldDaily() {
@@ -1061,7 +1072,7 @@ function completedTodayTasks() {
 }
 function byOrder(a, b) { return a.order - b.order; }
 function allPendingTodayCount() {
-  // スペース絞り込みに関係ない、アプリ全体での「今日やる残り件数」（通知の判定に使う）
+  // スペース絞り込みに関係ない、アプリ全体での「今日やる残り件数」（FCM通知の件数同期で使用予定）
   return data.tasks.filter((t) => isTodayTask(t) || isCarryOver(t)).length;
 }
 
@@ -1415,7 +1426,7 @@ function renderStats() {
   for (let i = 13; i >= 0; i--) days.push(keyOffset(todayKey(), -i));
   const vals = days.map((k) => data.stats.daily[k] || 0);
   const max = Math.max(...vals, 1);
-  const W = 336, H = 110, bw = 16, gap = (W - 14 * bw) / 13, bh = 78, base = 88;
+  const W = 336, H = 110, bw = 16, gap = (W - 14 * bw) / 13, bh = 66, base = 88;
   let bars = "";
   days.forEach((k, i) => {
     const v = vals[i];
@@ -1424,7 +1435,8 @@ function renderStats() {
     const isToday = i === 13;
     const fill = isToday ? "var(--accent)" : (v > 0 ? "var(--green)" : "var(--line)");
     bars += `<rect x="${x}" y="${base - h}" width="${bw}" height="${h}" rx="4" fill="${fill}" opacity="${v > 0 || isToday ? 1 : .8}"/>`;
-    if (v > 0) bars += `<text x="${x + bw / 2}" y="${base - h - 5}" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink-2)">${v}</text>`;
+    // 件数の数字がグラフ上端で見切れないよう、最小y座標を確保する
+    if (v > 0) bars += `<text x="${x + bw / 2}" y="${Math.max(9, base - h - 5)}" text-anchor="middle" font-size="9.5" font-weight="700" fill="var(--ink-2)">${v}</text>`;
     if (i % 2 === 1 || isToday) {
       const dd = dateFromKey(k);
       bars += `<text x="${x + bw / 2}" y="${H - 4}" text-anchor="middle" font-size="9" fill="var(--ink-2)">${isToday ? "きょう" : dd.getDate()}</text>`;
@@ -1727,6 +1739,24 @@ function openSheet(id) {
     title.value = t.title;
     body.appendChild(title);
 
+    // 「きょうやる」はこのアプリのコア操作なのでタイトル直下に置く
+    let todayOn = isTodayTask(t);
+    const sw = el("div", "today-switch" + (todayOn ? " on" : ""));
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(todayOn));
+    sw.setAttribute("tabindex", "0");
+    sw.appendChild(el("span", "", "きょうやる"));
+    sw.appendChild(el("span", "knob"));
+    const flip = () => {
+      if (sw.classList.contains("locked")) return;
+      todayOn = !todayOn;
+      sw.classList.toggle("on", todayOn);
+      sw.setAttribute("aria-checked", String(todayOn));
+    };
+    sw.addEventListener("click", flip);
+    sw.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); flip(); } });
+    body.appendChild(sw);
+
     body.appendChild(mkLabel("期限", "sheetDue"));
     const due = el("input", "due-input num");
     due.id = "sheetDue";
@@ -1734,7 +1764,17 @@ function openSheet(id) {
     due.value = t.due || "";
     body.appendChild(due);
 
-    body.appendChild(mkLabel("繰り返し"));
+    // 使用頻度の低い設定は折りたたむ（段階的開示）。値が設定済みのタスクでは開いた状態で出す
+    let onDetailChange = () => {};
+    const more = el("details", "sheet-more");
+    const moreSummary = el("summary");
+    moreSummary.appendChild(el("span", "", "くわしい設定"));
+    const sumChips = el("span", "sum-chips");
+    moreSummary.appendChild(sumChips);
+    more.appendChild(moreSummary);
+    body.appendChild(more);
+
+    more.appendChild(mkLabel("繰り返し"));
     let repeatDays = (t.repeat && t.repeat.days) ? t.repeat.days.slice() : [];
     const dayToggles = el("div", "seg");
     const dayBtns = WD.map((lab, dow) => {
@@ -1744,61 +1784,63 @@ function openSheet(id) {
       b.addEventListener("click", () => {
         repeatDays = repeatDays.includes(dow) ? repeatDays.filter((d) => d !== dow) : [...repeatDays, dow];
         dayBtns.forEach((f) => f());
+        onDetailChange();
       });
       dayToggles.appendChild(b);
       return sync;
     });
     dayBtns.forEach((f) => f());
-    body.appendChild(dayToggles);
+    more.appendChild(dayToggles);
     const repeatPresets = el("div", "sheet-tagchips");
     const presetBtn = (label, days) => {
       const b = el("button", "f-chip", label);
       b.type = "button";
-      b.addEventListener("click", () => { repeatDays = days.slice(); dayBtns.forEach((f) => f()); });
+      b.addEventListener("click", () => { repeatDays = days.slice(); dayBtns.forEach((f) => f()); onDetailChange(); });
       repeatPresets.appendChild(b);
     };
     presetBtn("毎日", [0, 1, 2, 3, 4, 5, 6]);
     presetBtn("平日", [1, 2, 3, 4, 5]);
     presetBtn("繰り返さない", []);
-    body.appendChild(repeatPresets);
+    more.appendChild(repeatPresets);
     const repeatHint = el("div", "", "繰り返しを設定すると、期限と「きょう」設定より優先されます");
     repeatHint.style.cssText = "font-size:11px;color:var(--ink-2);margin:6px 2px 0;";
-    body.appendChild(repeatHint);
+    more.appendChild(repeatHint);
 
-    body.appendChild(mkLabel("優先度"));
+    more.appendChild(mkLabel("優先度"));
     const seg = el("div", "seg");
     let prio = t.priority;
     const segBtns = [["低", 0, ""], ["中", 1, ""], ["高", 2, "hi"]].map(([lab, val, cls]) => {
       const b = el("button", "seg-btn", lab);
       b.type = "button";
       const sync = () => { b.className = (prio === val ? "on " + cls : ""); };
-      b.addEventListener("click", () => { prio = val; segBtns.forEach((f) => f()); });
+      b.addEventListener("click", () => { prio = val; segBtns.forEach((f) => f()); onDetailChange(); });
       seg.appendChild(b);
       return sync;
     });
     segBtns.forEach((f) => f());
-    body.appendChild(seg);
+    more.appendChild(seg);
 
-    body.appendChild(mkLabel("所属"));
+    more.appendChild(mkLabel("所属"));
     const spaceSeg = el("div", "seg");
     let spaceSel = spaceOf(t);
     const spaceBtns = [["じぶん", "jibun"], ["しごと", "shigoto"]].map(([lab, val]) => {
       const b = el("button", "", lab);
       b.type = "button";
       const sync = () => { b.className = (spaceSel === val ? "on" : ""); };
-      b.addEventListener("click", () => { spaceSel = val; spaceBtns.forEach((f) => f()); });
+      b.addEventListener("click", () => { spaceSel = val; spaceBtns.forEach((f) => f()); onDetailChange(); });
       spaceSeg.appendChild(b);
       return sync;
     });
     spaceBtns.forEach((f) => f());
-    body.appendChild(spaceSeg);
+    more.appendChild(spaceSeg);
 
-    body.appendChild(mkLabel("タグ（読点・カンマ区切り）", "sheetTags"));
+    more.appendChild(mkLabel("タグ（読点・カンマ区切り）", "sheetTags"));
     const tags = el("input", "tags-input");
     tags.id = "sheetTags";
     tags.type = "text";
     tags.value = t.tags.join("、");
-    body.appendChild(tags);
+    tags.addEventListener("input", () => onDetailChange());
+    more.appendChild(tags);
     const known = allTags();
     if (known.length) {
       const chips = el("div", "sheet-tagchips");
@@ -1817,24 +1859,26 @@ function openSheet(id) {
         tags.addEventListener("input", sync);
         chips.appendChild(b);
       });
-      body.appendChild(chips);
+      more.appendChild(chips);
     }
 
-    let todayOn = isTodayTask(t);
-    const sw = el("div", "today-switch" + (todayOn ? " on" : ""));
-    sw.setAttribute("role", "switch");
-    sw.setAttribute("aria-checked", String(todayOn));
-    sw.setAttribute("tabindex", "0");
-    sw.appendChild(el("span", "", "きょうやる"));
-    sw.appendChild(el("span", "knob"));
-    const flip = () => {
-      todayOn = !todayOn;
-      sw.classList.toggle("on", todayOn);
-      sw.setAttribute("aria-checked", String(todayOn));
+    // 折りたたみの要約チップ（閉じていても設定内容が見えるように）と、繰り返し設定中の期限/きょうのロック
+    const updateSummary = () => {
+      sumChips.innerHTML = "";
+      if (repeatDays.length) sumChips.appendChild(el("span", "chip", repeatLabel({ days: repeatDays })));
+      if (prio === 2) sumChips.appendChild(el("span", "chip", "高"));
+      if (prio === 0) sumChips.appendChild(el("span", "chip", "低"));
+      if (spaceSel === "shigoto") sumChips.appendChild(el("span", "chip", "しごと"));
+      parseTags(tags.value).forEach((x) => sumChips.appendChild(el("span", "chip", "#" + x)));
     };
-    sw.addEventListener("click", flip);
-    sw.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); flip(); } });
-    body.appendChild(sw);
+    const syncRepeatLock = () => {
+      const locked = repeatDays.length > 0;
+      due.disabled = locked;
+      sw.classList.toggle("locked", locked);
+    };
+    onDetailChange = () => { updateSummary(); syncRepeatLock(); };
+    more.open = !!(repeatDays.length || prio !== 1 || spaceSel === "shigoto" || t.tags.length);
+    onDetailChange();
 
     const acts = el("div", "sheet-actions");
     const saveBtn = el("button", "save", "保存");
@@ -1987,66 +2031,17 @@ $("#themeBtn").addEventListener("click", () => {
 });
 mqDark.addEventListener("change", () => { if (data.settings.theme === "system") applyTheme(); });
 
-/* --- 通知（ベストエフォート。Chrome・ホーム画面インストール時のみ動作） ---
-   Periodic Background Syncを使うため送信サーバーは不要だが、実際に発火する頻度・タイミングは
-   ブラウザ側の判断（エンゲージメント等）に依存し保証されない。SWはlocalStorageを読めないため、
-   「今日の残り件数」だけをIndexedDBに書き出して橋渡しする（タスクの中身は書き込まない）。 */
-const NOTIFY_TAG = "kyou-yaru-daily-check";
-function writeNotifyDigest() {
-  if (!("indexedDB" in window)) return;
+/* --- v1.4のベストエフォート通知は撤去済み（確実に届くFCM通知に置き換え予定）。
+   v1.4で通知をオンにした端末の後片付けだけ行う。この掃除コードは数バージョン後に削除してよい --- */
+(async () => {
+  try { indexedDB.deleteDatabase("kyouyaru-notify"); } catch (_) {}
   try {
-    const req = indexedDB.open("kyouyaru-notify", 1);
-    req.onupgradeneeded = () => { req.result.createObjectStore("digest"); };
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction("digest", "readwrite");
-      tx.objectStore("digest").put({ pending: allPendingTodayCount(), dateKey: todayKey() }, "today");
-      tx.oncomplete = () => db.close();
-      tx.onerror = () => db.close();
-    };
-  } catch (_) { /* プライベートモード等でIndexedDBが使えない場合は静かに諦める */ }
-}
-function supportsPeriodicNotify() {
-  return "Notification" in window && "serviceWorker" in navigator &&
-    typeof ServiceWorkerRegistration !== "undefined" && "periodicSync" in ServiceWorkerRegistration.prototype;
-}
-async function refreshNotifyBtn() {
-  const btn = $("#notifyBtn");
-  if (!supportsPeriodicNotify()) { btn.hidden = true; return; }
-  btn.hidden = false;
-  const perm = Notification.permission;
-  if (perm === "denied") {
-    btn.textContent = "🔕 オフ";
-  } else if (perm === "granted") {
-    let registered = false;
-    try {
+    if ("serviceWorker" in navigator && "periodicSync" in (window.ServiceWorkerRegistration?.prototype || {})) {
       const reg = await navigator.serviceWorker.ready;
-      registered = (await reg.periodicSync.getTags()).includes(NOTIFY_TAG);
-    } catch (_) {}
-    btn.textContent = registered ? "🔔 オン" : "🔔 未設定";
-  } else {
-    btn.textContent = "🔔 通知";
-  }
-}
-$("#notifyBtn").addEventListener("click", async () => {
-  if (!supportsPeriodicNotify()) return;
-  if (Notification.permission === "denied") {
-    toast("通知がブロックされています。ブラウザの設定から許可してください");
-    return;
-  }
-  const perm = await Notification.requestPermission();
-  if (perm !== "granted") { toast("通知を許可されませんでした"); refreshNotifyBtn(); return; }
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    await reg.periodicSync.register(NOTIFY_TAG, { minInterval: 20 * 60 * 60 * 1000 });
-    writeNotifyDigest();
-    toast("通知をオンにしました（ホーム画面に追加していないと動かないことがあります）");
-  } catch (_) {
-    toast("通知の登録に失敗しました。ホーム画面に追加してから試してください");
-  }
-  refreshNotifyBtn();
-});
-refreshNotifyBtn();
+      await reg.periodicSync.unregister("kyou-yaru-daily-check");
+    }
+  } catch (_) {}
+})();
 
 /* ============================================================
    === 日またぎ検知・全体描画・起動 =============================
