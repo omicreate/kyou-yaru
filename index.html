@@ -141,6 +141,7 @@ button:active { transform: scale(.96); }
   border: 1px solid var(--line);
   color: var(--ink-2);
 }
+.chip.repeat { background: var(--green-soft); color: var(--green); }
 main {
   flex: 1;
   padding: 4px 20px 170px; /* 下部バー分の余白 */
@@ -482,7 +483,7 @@ details.done-fold summary::marker { color: var(--line); }
 .tag-stats .tname { min-width: 72px; color: var(--ink-2); }
 .tag-stats .tcnt { margin-left: auto; color: var(--ink-2); }
 .heatmap-wrap { overflow-x: auto; margin: 0 -2px; padding: 0 2px 2px; -webkit-overflow-scrolling: touch; }
-.heatmap-wrap svg { min-width: 480px; cursor: default; }
+.heatmap-wrap svg { width: auto; max-width: 100%; height: auto; cursor: default; }
 .heatmap-cell { cursor: pointer; transition: transform .1s ease; transform-box: fill-box; transform-origin: center; }
 .heatmap-cell:active { transform: scale(.82); }
 .heatmap-legend { display: flex; align-items: center; gap: 5px; margin-top: 10px; font-size: 10.5px; color: var(--ink-2); }
@@ -839,12 +840,21 @@ function fmtDueChip(due) {
    ============================================================ */
 const STORE_KEY = "kyouyaru.data";
 const BACKUP_KEY = "kyouyaru.data.backup";
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 // スキーマを上げるときは { バージョン: (d) => {...変換して返す} } を追加する
 const MIGRATIONS = {
   // v2: じぶん/しごとスペースの導入。既存タスクはすべて「じぶん」
   2: (d) => {
     (d.tasks || []).forEach((t) => { if (!t.space) t.space = "jibun"; });
+    return d;
+  },
+  // v3: 繰り返し（ルーチン）タスクの導入
+  3: (d) => {
+    (d.tasks || []).forEach((t) => {
+      if (!("repeat" in t)) t.repeat = null;
+      if (!("lastCompletedDate" in t)) t.lastCompletedDate = null;
+      if (!("completionCount" in t)) t.completionCount = 0;
+    });
     return d;
   },
 };
@@ -910,6 +920,9 @@ function addTask(title, opts = {}) {
     space: opts.space || (data.settings.spaceFilter === "shigoto" ? "shigoto" : "jibun"),
     today: !!opts.today,
     todayDate: opts.today ? todayKey() : null,
+    repeat: opts.repeat || null,
+    lastCompletedDate: null,
+    completionCount: 0,
     order: nextOrder(),
   };
   data.tasks.push(task);
@@ -918,11 +931,22 @@ function addTask(title, opts = {}) {
 }
 function getTask(id) { return data.tasks.find((t) => t.id === id); }
 
+function isDoneNow(t) {
+  return t.repeat ? t.lastCompletedDate === todayKey() : !!t.completedAt;
+}
 function completeTask(id) {
   const t = getTask(id);
-  if (!t || t.completedAt) return;
-  t.completedAt = Date.now();
+  if (!t) return;
   const k = todayKey();
+  if (t.repeat) {
+    // ルーチンは「今日ぶんの完了」を記録するだけ。次の該当曜日にまた出現する
+    if (t.lastCompletedDate === k) return;
+    t.lastCompletedDate = k;
+    t.completionCount = (t.completionCount || 0) + 1;
+  } else {
+    if (t.completedAt) return;
+    t.completedAt = Date.now();
+  }
   data.stats.daily[k] = (data.stats.daily[k] || 0) + 1;
   const s = currentStreak();
   if (s.count > data.stats.bestStreak) data.stats.bestStreak = s.count;
@@ -930,14 +954,23 @@ function completeTask(id) {
 }
 function uncompleteTask(id) {
   const t = getTask(id);
-  if (!t || !t.completedAt) return;
+  if (!t) return;
   const k = todayKey();
-  // 当日完了分の取り消しのみ実績を減算（過去日の実績は守る）
-  if (dateKeyOfTs(t.completedAt) === k && (data.stats.daily[k] || 0) > 0) {
+  let undidToday = false;
+  if (t.repeat) {
+    if (t.lastCompletedDate !== k) return;
+    t.lastCompletedDate = null;
+    t.completionCount = Math.max(0, (t.completionCount || 0) - 1);
+    undidToday = true;
+  } else {
+    if (!t.completedAt) return;
+    undidToday = dateKeyOfTs(t.completedAt) === k; // 当日完了分の取り消しのみ実績を減算（過去日の実績は守る）
+    t.completedAt = null;
+  }
+  if (undidToday && (data.stats.daily[k] || 0) > 0) {
     data.stats.daily[k]--;
     if (data.stats.daily[k] === 0) delete data.stats.daily[k];
   }
-  t.completedAt = null;
   save();
 }
 function deleteTask(id) {
@@ -1000,17 +1033,23 @@ function inSpace(t) {
 }
 function isTodayTask(t) {
   const k = todayKey();
-  return !t.completedAt && ((t.due === k) || (t.today && t.todayDate === k));
+  if (isDoneNow(t)) return false;
+  if (t.repeat) return t.repeat.days.includes(dateFromKey(k).getDay());
+  return (t.due === k) || (t.today && t.todayDate === k);
 }
 function isCarryOver(t) {
+  // ルーチンは持ち越さない。やらなかった日は静かに消え、次の該当曜日にまた出現する
+  if (t.repeat) return false;
   const k = todayKey();
   if (t.completedAt || isTodayTask(t)) return false;
   return (t.due && t.due < k) || (t.today && t.todayDate && t.todayDate < k);
 }
 function completedTodayTasks() {
   const k = todayKey();
-  return data.tasks.filter((t) => t.completedAt && dateKeyOfTs(t.completedAt) === k)
+  const repeatDone = data.tasks.filter((t) => t.repeat && t.lastCompletedDate === k);
+  const oneOffDone = data.tasks.filter((t) => !t.repeat && t.completedAt && dateKeyOfTs(t.completedAt) === k)
     .sort((a, b) => b.completedAt - a.completedAt);
+  return [...repeatDone, ...oneOffDone];
 }
 function byOrder(a, b) { return a.order - b.order; }
 
@@ -1038,14 +1077,23 @@ function toast(msg) {
    ============================================================ */
 const FLAME_SVG = '<svg viewBox="0 0 14 16" aria-hidden="true"><path class="flame" d="M7 0C7.5 3 10.8 4.5 11.8 7.6c1 3.2-.7 6.9-4.8 6.9S1.4 11 2.4 8.1C3 6.3 4.4 5.3 4.6 3.6 5.9 4.5 6.5 5.6 6.4 7 7.8 6 7.6 2.6 7 0z"/></svg>';
 const CHECK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="ring" cx="12" cy="12" r="10"/><path class="mark" d="M7.5 12.5l3 3L16.5 9"/></svg>';
+function repeatLabel(r) {
+  if (!r || !r.days || !r.days.length) return "";
+  const days = r.days.slice().sort();
+  if (days.length === 7) return "🔁毎日";
+  if (days.length === 5 && [1, 2, 3, 4, 5].every((d) => days.includes(d))) return "🔁平日";
+  if (days.length === 2 && [0, 6].every((d) => days.includes(d))) return "🔁週末";
+  return "🔁" + days.map((d) => WD[d]).join("");
+}
 
 function taskRow(t, ctx) {
   // ctx: { showTodayToggle, sortable }
-  const li = el("li", "task" + (t.completedAt ? " done" : ""));
+  const done = isDoneNow(t);
+  const li = el("li", "task" + (done ? " done" : ""));
   li.dataset.id = t.id;
 
   const check = el("button", "check");
-  check.setAttribute("aria-label", t.completedAt ? "未完了に戻す" : "完了にする");
+  check.setAttribute("aria-label", done ? "未完了に戻す" : "完了にする");
   check.innerHTML = CHECK_SVG;
   check.addEventListener("click", () => onToggleComplete(t.id, li));
   li.appendChild(check);
@@ -1053,6 +1101,7 @@ function taskRow(t, ctx) {
   const body = el("div", "task-body");
   body.appendChild(el("div", "task-title", t.title));
   const meta = el("div", "task-meta");
+  if (t.repeat) meta.appendChild(el("span", "chip repeat", repeatLabel(t.repeat)));
   if (t.due) {
     const c = fmtDueChip(t.due);
     meta.appendChild(el("span", "chip num " + c.cls, c.text));
@@ -1067,7 +1116,7 @@ function taskRow(t, ctx) {
   body.addEventListener("click", () => openSheet(t.id));
   li.appendChild(body);
 
-  if (ctx.showTodayToggle && !t.completedAt) {
+  if (ctx.showTodayToggle && !t.repeat && !done) {
     const tg = el("button", "today-toggle" + (isTodayTask(t) ? " on" : ""), "きょう");
     tg.setAttribute("aria-label", isTodayTask(t) ? "今日から外す" : "今日やるに追加");
     tg.setAttribute("aria-pressed", String(isTodayTask(t)));
@@ -1079,7 +1128,7 @@ function taskRow(t, ctx) {
     });
     li.appendChild(tg);
   }
-  if (ctx.sortable && !t.completedAt) {
+  if (ctx.sortable && !done) {
     const h = el("div", "drag-handle", "⠿");
     h.setAttribute("aria-hidden", "true");
     li.appendChild(h);
@@ -1091,7 +1140,7 @@ function taskRow(t, ctx) {
 function onToggleComplete(id, row) {
   const t = getTask(id);
   if (!t) return;
-  if (t.completedAt) {
+  if (isDoneNow(t)) {
     uncompleteTask(id);
     renderAll();
     return;
@@ -1265,8 +1314,9 @@ function renderAllView() {
   renderFilterRow();
   const host = $("#allContent");
   host.innerHTML = "";
-  const active = data.tasks.filter((t) => !t.completedAt && inSpace(t)).sort(byOrder);
-  const done = data.tasks.filter((t) => t.completedAt && inSpace(t)).sort((a, b) => b.completedAt - a.completedAt);
+  // ルーチンは常にアクティブ側に留まる（今日の達成状態はチェックの見た目だけで表現）
+  const active = data.tasks.filter((t) => (t.repeat || !t.completedAt) && inSpace(t)).sort(byOrder);
+  const done = data.tasks.filter((t) => !t.repeat && t.completedAt && inSpace(t)).sort((a, b) => b.completedAt - a.completedAt);
   const filtered = active.filter(matchesFilter);
   const anyFilter = filter.q || filter.hasDue || filter.prio.size || filter.tags.size;
 
@@ -1376,11 +1426,12 @@ function renderStats() {
   chart.appendChild(svg);
   host.appendChild(chart);
 
-  // タグ別内訳（完了タスクベース）
+  // タグ別内訳（完了タスクベース。ルーチンは累計完了回数ぶんカウント）
   const counts = {};
   data.tasks.forEach((t) => {
-    if (!t.completedAt) return;
-    t.tags.forEach((x) => { counts[x] = (counts[x] || 0) + 1; });
+    const n = t.repeat ? (t.completionCount || 0) : (t.completedAt ? 1 : 0);
+    if (n <= 0) return;
+    t.tags.forEach((x) => { counts[x] = (counts[x] || 0) + n; });
   });
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
   if (entries.length) {
@@ -1401,9 +1452,11 @@ function renderStats() {
     host.appendChild(cardT);
   }
 
-  // スペース別内訳（完了タスクベース）
+  // スペース別内訳（完了タスクベース。ルーチンは累計完了回数ぶんカウント）
   const spaceCounts = { jibun: 0, shigoto: 0 };
-  data.tasks.forEach((t) => { if (t.completedAt) spaceCounts[spaceOf(t)]++; });
+  data.tasks.forEach((t) => {
+    spaceCounts[spaceOf(t)] += t.repeat ? (t.completionCount || 0) : (t.completedAt ? 1 : 0);
+  });
   if (spaceCounts.jibun + spaceCounts.shigoto > 0) {
     const cardS = el("div", "chart-card");
     cardS.appendChild(el("div", "label", "スペース別の完了数"));
@@ -1424,13 +1477,25 @@ function renderStats() {
 }
 
 /* --- 継続カレンダー（GitHub風の草グラフ、直近20週・タップで日付詳細） --- */
+function firstActivityKey() {
+  // 使い始めた日（＝一番古いタスク作成日か完了記録日）。継続カレンダーを使用実績の範囲だけに絞るために使う
+  const keys = [...Object.keys(data.stats.daily), ...data.tasks.map((x) => dateKeyOfTs(x.createdAt))];
+  return keys.length ? keys.sort()[0] : todayKey();
+}
 function buildHeatmapCard() {
-  const CS = 12, GAP = 3, ROWS = 7, WEEKS = 20, GUTTER = 15, TOP = 13;
-  const W = GUTTER + WEEKS * CS + (WEEKS - 1) * GAP;
-  const H = TOP + ROWS * CS + (ROWS - 1) * GAP;
+  const CS = 12, GAP = 3, ROWS = 7, MAX_WEEKS = 20, GUTTER = 15, TOP = 13;
   const t = todayKey();
   const todayDow = dateFromKey(t).getDay();
   const recentSunday = keyOffset(t, -todayDow);
+
+  // 使い始めた週より前は表示しない（新規ユーザーがいきなり何ヶ月分もの空欄を見ずに済むように）
+  const firstKey = firstActivityKey();
+  const firstSunday = keyOffset(firstKey, -dateFromKey(firstKey).getDay());
+  const weeksSinceFirst = Math.round((dateFromKey(recentSunday) - dateFromKey(firstSunday)) / (7 * 86400000)) + 1;
+  const WEEKS = Math.min(MAX_WEEKS, Math.max(1, weeksSinceFirst));
+
+  const W = GUTTER + WEEKS * CS + (WEEKS - 1) * GAP;
+  const H = TOP + ROWS * CS + (ROWS - 1) * GAP;
   const startKey = keyOffset(recentSunday, -(WEEKS - 1) * 7);
 
   const cells = [];
@@ -1481,8 +1546,10 @@ function buildHeatmapCard() {
   const wrap = el("div", "heatmap-wrap");
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", H);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "直近20週間の完了カレンダー");
+  svg.setAttribute("aria-label", `直近${WEEKS}週間の完了カレンダー`);
   svg.innerHTML = svgBody;
   svg.addEventListener("click", (e) => {
     const key = e.target?.dataset?.key;
@@ -1616,8 +1683,8 @@ function openSheet(id) {
   const body = $("#sheetBody");
   body.innerHTML = "";
 
-  if (t.completedAt) {
-    // 完了済み：復元 or 完全削除のみ
+  if (!t.repeat && t.completedAt) {
+    // 完了済み（ルーチン以外）：復元 or 完全削除のみ
     const ttl = el("div", "", "");
     ttl.style.cssText = "font-weight:800;font-size:16px;margin:4px 2px 2px;";
     ttl.textContent = t.title;
@@ -1654,6 +1721,37 @@ function openSheet(id) {
     due.type = "date";
     due.value = t.due || "";
     body.appendChild(due);
+
+    body.appendChild(mkLabel("繰り返し"));
+    let repeatDays = (t.repeat && t.repeat.days) ? t.repeat.days.slice() : [];
+    const dayToggles = el("div", "seg");
+    const dayBtns = WD.map((lab, dow) => {
+      const b = el("button", "", lab);
+      b.type = "button";
+      const sync = () => { b.className = repeatDays.includes(dow) ? "on" : ""; };
+      b.addEventListener("click", () => {
+        repeatDays = repeatDays.includes(dow) ? repeatDays.filter((d) => d !== dow) : [...repeatDays, dow];
+        dayBtns.forEach((f) => f());
+      });
+      dayToggles.appendChild(b);
+      return sync;
+    });
+    dayBtns.forEach((f) => f());
+    body.appendChild(dayToggles);
+    const repeatPresets = el("div", "sheet-tagchips");
+    const presetBtn = (label, days) => {
+      const b = el("button", "f-chip", label);
+      b.type = "button";
+      b.addEventListener("click", () => { repeatDays = days.slice(); dayBtns.forEach((f) => f()); });
+      repeatPresets.appendChild(b);
+    };
+    presetBtn("毎日", [0, 1, 2, 3, 4, 5, 6]);
+    presetBtn("平日", [1, 2, 3, 4, 5]);
+    presetBtn("繰り返さない", []);
+    body.appendChild(repeatPresets);
+    const repeatHint = el("div", "", "繰り返しを設定すると、期限と「きょう」設定より優先されます");
+    repeatHint.style.cssText = "font-size:11px;color:var(--ink-2);margin:6px 2px 0;";
+    body.appendChild(repeatHint);
 
     body.appendChild(mkLabel("優先度"));
     const seg = el("div", "seg");
@@ -1732,11 +1830,16 @@ function openSheet(id) {
       const v = title.value.trim();
       if (!v) { title.focus(); return; }
       t.title = v;
-      t.due = due.value || null;
       t.priority = prio;
       t.space = spaceSel;
       t.tags = parseTags(tags.value);
-      if (todayOn !== isTodayTask(t)) setToday(t.id, todayOn);
+      t.repeat = repeatDays.length ? { days: repeatDays.slice().sort() } : null;
+      if (t.repeat) {
+        t.due = null;
+      } else {
+        t.due = due.value || null;
+        if (todayOn !== isTodayTask(t)) setToday(t.id, todayOn);
+      }
       save();
       closeSheet();
       renderAll();
@@ -1752,7 +1855,7 @@ function openSheet(id) {
   bd.hidden = false; sh.hidden = false;
   requestAnimationFrame(() => { bd.classList.add("show"); sh.classList.add("show"); });
   const focusable = sh.querySelector("input, button");
-  if (focusable && !t.completedAt) setTimeout(() => $("#sheetTitle")?.focus({ preventScroll: true }), 250);
+  if (focusable && (t.repeat || !t.completedAt)) setTimeout(() => $("#sheetTitle")?.focus({ preventScroll: true }), 250);
 }
 function parseTags(v) {
   return [...new Set(v.split(/[、,，\s]+/).map((x) => x.trim().replace(/^#/, "")).filter(Boolean))].slice(0, 8);
