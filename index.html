@@ -102,6 +102,8 @@ button:active { transform: scale(.96); }
   letter-spacing: .18em;
   color: var(--ink-2);
 }
+.appbar-actions { display: flex; align-items: center; gap: 6px; }
+.appbar-actions .theme-btn[hidden] { display: none; }
 .theme-btn {
   min-width: var(--tap); height: 36px;
   display: inline-flex; align-items: center; gap: 6px;
@@ -734,7 +736,10 @@ noscript { display: block; padding: 40px 20px; text-align: center; }
 <div id="app">
   <header class="appbar">
     <span class="brand">きょうやる</span>
-    <button class="theme-btn" id="themeBtn" aria-label="テーマ切替"></button>
+    <div class="appbar-actions">
+      <button class="theme-btn" id="notifyBtn" aria-label="通知の設定" hidden></button>
+      <button class="theme-btn" id="themeBtn" aria-label="テーマ切替"></button>
+    </div>
   </header>
 
   <div class="space-switch" id="spaceSwitch" role="group" aria-label="表示する範囲">
@@ -890,7 +895,10 @@ function load() {
   }
 }
 let data = load();
-function save() { localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+function save() {
+  localStorage.setItem(STORE_KEY, JSON.stringify(data));
+  writeNotifyDigest();
+}
 if (migratedOnLoad) save(); // 移行結果を書き戻す（次回以降は再移行しない）
 
 function pruneOldDaily() {
@@ -1052,6 +1060,10 @@ function completedTodayTasks() {
   return [...repeatDone, ...oneOffDone];
 }
 function byOrder(a, b) { return a.order - b.order; }
+function allPendingTodayCount() {
+  // スペース絞り込みに関係ない、アプリ全体での「今日やる残り件数」（通知の判定に使う）
+  return data.tasks.filter((t) => isTodayTask(t) || isCarryOver(t)).length;
+}
 
 /* ============================================================
    === dom helpers ============================================
@@ -1974,6 +1986,67 @@ $("#themeBtn").addEventListener("click", () => {
   applyTheme();
 });
 mqDark.addEventListener("change", () => { if (data.settings.theme === "system") applyTheme(); });
+
+/* --- 通知（ベストエフォート。Chrome・ホーム画面インストール時のみ動作） ---
+   Periodic Background Syncを使うため送信サーバーは不要だが、実際に発火する頻度・タイミングは
+   ブラウザ側の判断（エンゲージメント等）に依存し保証されない。SWはlocalStorageを読めないため、
+   「今日の残り件数」だけをIndexedDBに書き出して橋渡しする（タスクの中身は書き込まない）。 */
+const NOTIFY_TAG = "kyou-yaru-daily-check";
+function writeNotifyDigest() {
+  if (!("indexedDB" in window)) return;
+  try {
+    const req = indexedDB.open("kyouyaru-notify", 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore("digest"); };
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction("digest", "readwrite");
+      tx.objectStore("digest").put({ pending: allPendingTodayCount(), dateKey: todayKey() }, "today");
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    };
+  } catch (_) { /* プライベートモード等でIndexedDBが使えない場合は静かに諦める */ }
+}
+function supportsPeriodicNotify() {
+  return "Notification" in window && "serviceWorker" in navigator &&
+    typeof ServiceWorkerRegistration !== "undefined" && "periodicSync" in ServiceWorkerRegistration.prototype;
+}
+async function refreshNotifyBtn() {
+  const btn = $("#notifyBtn");
+  if (!supportsPeriodicNotify()) { btn.hidden = true; return; }
+  btn.hidden = false;
+  const perm = Notification.permission;
+  if (perm === "denied") {
+    btn.textContent = "🔕 オフ";
+  } else if (perm === "granted") {
+    let registered = false;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      registered = (await reg.periodicSync.getTags()).includes(NOTIFY_TAG);
+    } catch (_) {}
+    btn.textContent = registered ? "🔔 オン" : "🔔 未設定";
+  } else {
+    btn.textContent = "🔔 通知";
+  }
+}
+$("#notifyBtn").addEventListener("click", async () => {
+  if (!supportsPeriodicNotify()) return;
+  if (Notification.permission === "denied") {
+    toast("通知がブロックされています。ブラウザの設定から許可してください");
+    return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { toast("通知を許可されませんでした"); refreshNotifyBtn(); return; }
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    await reg.periodicSync.register(NOTIFY_TAG, { minInterval: 20 * 60 * 60 * 1000 });
+    writeNotifyDigest();
+    toast("通知をオンにしました（ホーム画面に追加していないと動かないことがあります）");
+  } catch (_) {
+    toast("通知の登録に失敗しました。ホーム画面に追加してから試してください");
+  }
+  refreshNotifyBtn();
+});
+refreshNotifyBtn();
 
 /* ============================================================
    === 日またぎ検知・全体描画・起動 =============================
