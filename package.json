@@ -1,0 +1,21 @@
+{
+  "name": "kyou-yaru",
+  "version": "1.1.0",
+  "description": "今日やることだけに集中する、シンプルで気持ちいいToDoアプリ。",
+  "private": true,
+  "scripts": {
+    "check:public-info": "node scripts/check-public-info.js",
+    "test": "npm run check:public-info"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/omicreate/kyou-yaru.git"
+  },
+  "keywords": [],
+  "author": "omicreate",
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/omicreate/kyou-yaru/issues"
+  },
+  "homepage": "https://omicreate.github.io/kyou-yaru/"
+}

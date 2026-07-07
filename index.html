@@ -481,6 +481,12 @@ details.done-fold summary::marker { color: var(--line); }
 }
 .tag-stats .tname { min-width: 72px; color: var(--ink-2); }
 .tag-stats .tcnt { margin-left: auto; color: var(--ink-2); }
+.heatmap-wrap { overflow-x: auto; margin: 0 -2px; padding: 0 2px 2px; -webkit-overflow-scrolling: touch; }
+.heatmap-wrap svg { min-width: 480px; cursor: default; }
+.heatmap-cell { cursor: pointer; transition: transform .1s ease; transform-box: fill-box; transform-origin: center; }
+.heatmap-cell:active { transform: scale(.82); }
+.heatmap-legend { display: flex; align-items: center; gap: 5px; margin-top: 10px; font-size: 10.5px; color: var(--ink-2); }
+.heatmap-legend .sq { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 
 /* ============================================================
    === クイック追加・タブバー ====================================
@@ -525,6 +531,21 @@ details.done-fold summary::marker { color: var(--line); }
   display: flex; align-items: center; justify-content: center;
   box-shadow: 0 4px 18px rgba(232,89,12,.35);
 }
+.quickadd .mic-btn {
+  background: var(--surface);
+  border: 1.5px solid var(--line);
+  color: var(--ink-2);
+  box-shadow: 0 4px 18px rgba(46,42,37,.08);
+}
+.quickadd .mic-btn[hidden] { display: none; }
+.mic-btn svg { width: 22px; height: 22px; }
+.mic-btn.listening {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  animation: mic-pulse 1.2s ease infinite;
+}
+@keyframes mic-pulse { 50% { box-shadow: 0 0 0 9px rgba(232,89,12,.16); } }
 .tabbar {
   pointer-events: auto;
   display: flex;
@@ -755,6 +776,13 @@ noscript { display: block; padding: 40px 20px; text-align: center; }
   <div class="bottom-dock">
     <form class="quickadd" id="quickAdd">
       <input type="text" id="quickInput" placeholder="きょうやることを追加" aria-label="タスクを追加" maxlength="200" autocomplete="off">
+      <button type="button" class="mic-btn" id="micBtn" aria-label="音声入力">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor" stroke="none"/>
+          <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/>
+          <line x1="12" y1="18" x2="12" y2="21"/>
+        </svg>
+      </button>
       <button type="submit" aria-label="追加">＋</button>
     </form>
     <nav class="tabbar" role="tablist" aria-label="画面切替">
@@ -959,6 +987,8 @@ function currentStreak() {
   while ((data.stats.daily[day] || 0) > 0) { count++; day = keyOffset(day, -1); }
   return { count, activeToday };
 }
+const STREAK_MILESTONES = [3, 7, 14, 30, 50, 100, 200, 365];
+function nextMilestone(count) { return STREAK_MILESTONES.find((m) => m > count) || null; }
 
 /* ============================================================
    === 集合ロジック（今日ビュー） ===============================
@@ -1300,13 +1330,21 @@ function renderStats() {
     if (note) c.appendChild(el("div", "note", note));
     return c;
   };
+  const nm = nextMilestone(s.count);
+  let streakNote;
+  if (!s.activeToday && s.count === 0) streakNote = "今日1件完了でスタート";
+  else if (!s.activeToday) streakNote = nm ? `今日1件完了で継続 ・ 次は${nm}日` : "今日1件完了で継続 ・ スゴイ記録！";
+  else if (nm) streakNote = `継続中 ・ あと${nm - s.count}日で${nm}日達成`;
+  else streakNote = "継続中 ・ スゴイ記録！";
   grid.appendChild(card("れんぞく", `${s.count}<small>日</small>`,
-    "streak-card" + (s.activeToday ? "" : " waiting"),
-    s.activeToday ? "継続中" : (s.count > 0 ? "今日1件完了で継続" : "今日1件完了でスタート")));
+    "streak-card" + (s.activeToday ? "" : " waiting"), streakNote));
   grid.appendChild(card("自己ベスト", `${data.stats.bestStreak}<small>日</small>`));
   grid.appendChild(card("きょう完了", `${todayCnt}<small>件</small>`));
   grid.appendChild(card("累計完了", `${total}<small>件</small>`));
   host.appendChild(grid);
+
+  // 継続カレンダー（草グラフ・直近20週）
+  host.appendChild(buildHeatmapCard());
 
   // 直近14日バーチャート（SVG手描き）
   const chart = el("div", "chart-card");
@@ -1362,6 +1400,110 @@ function renderStats() {
     cardT.appendChild(ul);
     host.appendChild(cardT);
   }
+
+  // スペース別内訳（完了タスクベース）
+  const spaceCounts = { jibun: 0, shigoto: 0 };
+  data.tasks.forEach((t) => { if (t.completedAt) spaceCounts[spaceOf(t)]++; });
+  if (spaceCounts.jibun + spaceCounts.shigoto > 0) {
+    const cardS = el("div", "chart-card");
+    cardS.appendChild(el("div", "label", "スペース別の完了数"));
+    const ul = el("ul", "tag-stats");
+    const maxS = Math.max(spaceCounts.jibun, spaceCounts.shigoto, 1);
+    [["じぶん", spaceCounts.jibun], ["しごと", spaceCounts.shigoto]].forEach(([label, cnt]) => {
+      const li = el("li");
+      li.appendChild(el("span", "tname", label));
+      const bar = el("span", "bar");
+      bar.style.width = Math.max(8, (cnt / maxS) * 140) + "px";
+      li.appendChild(bar);
+      li.appendChild(el("span", "tcnt num", cnt + "件"));
+      ul.appendChild(li);
+    });
+    cardS.appendChild(ul);
+    host.appendChild(cardS);
+  }
+}
+
+/* --- 継続カレンダー（GitHub風の草グラフ、直近20週・タップで日付詳細） --- */
+function buildHeatmapCard() {
+  const CS = 12, GAP = 3, ROWS = 7, WEEKS = 20, GUTTER = 15, TOP = 13;
+  const W = GUTTER + WEEKS * CS + (WEEKS - 1) * GAP;
+  const H = TOP + ROWS * CS + (ROWS - 1) * GAP;
+  const t = todayKey();
+  const todayDow = dateFromKey(t).getDay();
+  const recentSunday = keyOffset(t, -todayDow);
+  const startKey = keyOffset(recentSunday, -(WEEKS - 1) * 7);
+
+  const cells = [];
+  let max = 1;
+  for (let i = 0; i < WEEKS * 7; i++) {
+    const k = keyOffset(startKey, i);
+    if (k > t) break;
+    const cnt = data.stats.daily[k] || 0;
+    if (cnt > max) max = cnt;
+    cells.push({ k, week: Math.floor(i / 7), dow: i % 7, cnt });
+  }
+  const LEVELS = [
+    { fill: "var(--line)", op: 1 },
+    { fill: "var(--accent)", op: .32 },
+    { fill: "var(--accent)", op: .52 },
+    { fill: "var(--accent)", op: .72 },
+    { fill: "var(--accent)", op: 1 },
+  ];
+  const bucket = (cnt) => {
+    if (cnt <= 0) return 0;
+    const r = cnt / max;
+    return r > 0.75 ? 4 : r > 0.5 ? 3 : r > 0.25 ? 2 : 1;
+  };
+  let svgBody = "";
+  const seenMonth = new Set();
+  cells.forEach((c) => {
+    const x = GUTTER + c.week * (CS + GAP);
+    const y = TOP + c.dow * (CS + GAP);
+    const lv = LEVELS[bucket(c.cnt)];
+    const isToday = c.k === t;
+    svgBody += `<rect class="heatmap-cell" data-key="${c.k}" data-cnt="${c.cnt}" x="${x}" y="${y}" width="${CS}" height="${CS}" rx="3" fill="${lv.fill}" opacity="${lv.op}"${isToday ? ' stroke="var(--ink)" stroke-width="1.5"' : ""}/>`;
+    if (c.dow === 0) {
+      const md = dateFromKey(c.k);
+      const mkey = md.getFullYear() + "-" + md.getMonth();
+      if (md.getDate() <= 7 && !seenMonth.has(mkey)) {
+        seenMonth.add(mkey);
+        svgBody += `<text x="${x}" y="${TOP - 4}" font-size="9" fill="var(--ink-2)">${md.getMonth() + 1}月</text>`;
+      }
+    }
+  });
+  [1, 3, 5].forEach((dow) => {
+    const y = TOP + dow * (CS + GAP) + CS * 0.8;
+    svgBody += `<text x="0" y="${y}" font-size="8" fill="var(--ink-2)">${WD[dow]}</text>`;
+  });
+
+  const card = el("div", "chart-card");
+  card.appendChild(el("div", "label", "継続カレンダー"));
+  const wrap = el("div", "heatmap-wrap");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "直近20週間の完了カレンダー");
+  svg.innerHTML = svgBody;
+  svg.addEventListener("click", (e) => {
+    const key = e.target?.dataset?.key;
+    if (!key) return;
+    const d = dateFromKey(key);
+    const cnt = Number(e.target.dataset.cnt || 0);
+    toast(`${d.getMonth() + 1}/${d.getDate()}（${WD[d.getDay()]}） ${cnt > 0 ? cnt + "件完了" : "完了なし"}`);
+  });
+  wrap.appendChild(svg);
+  card.appendChild(wrap);
+  const legend = el("div", "heatmap-legend");
+  legend.appendChild(el("span", "", "少ない"));
+  LEVELS.forEach((lv) => {
+    const sq = el("span", "sq");
+    sq.style.background = lv.fill;
+    sq.style.opacity = lv.op;
+    legend.appendChild(sq);
+  });
+  legend.appendChild(el("span", "", "多い"));
+  card.appendChild(legend);
+  return card;
 }
 
 /* ============================================================
@@ -1666,6 +1808,45 @@ $("#searchInput").addEventListener("input", (e) => {
   filter.q = e.target.value.trim().toLowerCase();
   renderAllView();
 });
+
+/* --- 音声入力（Web Speech API。非対応環境ではボタンごと隠す） --- */
+(() => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const micBtn = $("#micBtn");
+  if (!SR) { micBtn.hidden = true; return; }
+  let rec = null;
+  micBtn.addEventListener("click", () => {
+    if (rec) { rec.stop(); return; } // 聞き取り中にもう一度押したら停止
+    rec = new SR();
+    rec.lang = "ja-JP";
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    const input = $("#quickInput");
+    micBtn.classList.add("listening");
+    micBtn.setAttribute("aria-label", "音声入力を停止");
+    rec.onresult = (e) => {
+      let text = "";
+      for (const r of e.results) text += r[0].transcript;
+      input.value = text.trim();
+    };
+    rec.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") toast("マイクの使用が許可されていません");
+      else if (e.error === "no-speech") toast("聞き取れませんでした。もう一度どうぞ");
+      else if (e.error !== "aborted") toast("音声入力に失敗しました");
+    };
+    rec.onend = () => {
+      micBtn.classList.remove("listening");
+      micBtn.setAttribute("aria-label", "音声入力");
+      rec = null;
+      // 認識結果は入力欄に残す。追加の確定は＋で（誤認識ガード）
+    };
+    try { rec.start(); } catch (_) {
+      micBtn.classList.remove("listening");
+      rec = null;
+      toast("音声入力を開始できませんでした");
+    }
+  });
+})();
 
 /* --- テーマ --- */
 const THEME_LABEL = { system: "自動", light: "ライト", dark: "ダーク" };
