@@ -909,7 +909,10 @@ function load() {
   }
 }
 let data = load();
-function save() { localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+function save() {
+  localStorage.setItem(STORE_KEY, JSON.stringify(data));
+  if (typeof window.__notifySync === "function") window.__notifySync();
+}
 if (migratedOnLoad) save(); // 移行結果を書き戻す（次回以降は再移行しない）
 
 function pruneOldDaily() {
@@ -1072,8 +1075,28 @@ function completedTodayTasks() {
 }
 function byOrder(a, b) { return a.order - b.order; }
 function allPendingTodayCount() {
-  // スペース絞り込みに関係ない、アプリ全体での「今日やる残り件数」（FCM通知の件数同期で使用予定）
+  // スペース絞り込みに関係ない、アプリ全体での「今日やる残り件数」（FCM通知の件数同期で使用）
   return data.tasks.filter((t) => isTodayTask(t) || isCarryOver(t)).length;
+}
+
+/* --- 通知（Firebase Cloud Messaging）。実際のトークン取得・Firestore同期は下部のmoduleスクリプトで行う --- */
+function notifyGetState() {
+  if (!("Notification" in window) || !("serviceWorker" in navigator)) return "unsupported";
+  if (Notification.permission === "denied") return "denied";
+  return localStorage.getItem("kyouyaru.notifyEnabled") === "1" ? "on" : "off";
+}
+async function handleNotifyToggle() {
+  const state = notifyGetState();
+  if (state === "unsupported") { toast("この端末・ブラウザは通知に対応していません"); return; }
+  if (state === "denied") { toast("通知がブロックされています。ブラウザの設定から許可してください"); return; }
+  if (state === "on") {
+    await window.__fcmDisable?.();
+    toast("通知をオフにしました");
+  } else {
+    const ok = await window.__fcmEnable?.();
+    toast(ok ? "通知をオンにしました（毎日20:00ごろ届きます）" : "通知の設定に失敗しました");
+  }
+  renderAll();
 }
 
 /* ============================================================
@@ -1497,6 +1520,26 @@ function renderStats() {
     });
     cardS.appendChild(ul);
     host.appendChild(cardS);
+  }
+
+  // 通知（毎日決まった時刻に、今日の残りタスクをお知らせ）
+  const notifyState = notifyGetState();
+  if (notifyState !== "unsupported") {
+    const notifyCard = el("div", "chart-card");
+    notifyCard.appendChild(el("div", "label", "通知"));
+    const row = el("div", "today-switch" + (notifyState === "on" ? " on" : ""));
+    row.setAttribute("role", "switch");
+    row.setAttribute("aria-checked", String(notifyState === "on"));
+    row.setAttribute("tabindex", "0");
+    row.appendChild(el("span", "", "毎日20:00ごろ、今日の残りタスクをお知らせ"));
+    row.appendChild(el("span", "knob"));
+    row.addEventListener("click", handleNotifyToggle);
+    row.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); handleNotifyToggle(); } });
+    notifyCard.appendChild(row);
+    if (notifyState === "denied") {
+      notifyCard.appendChild(el("div", "note", "通知がブロックされています。ブラウザの設定から許可してください"));
+    }
+    host.appendChild(notifyCard);
   }
 }
 
@@ -2098,6 +2141,114 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch((e) => console.warn("SW登録失敗", e));
   });
 }
+</script>
+
+<!-- 通知（Firebase Cloud Messaging）。方針からの意図的な逸脱についてはPRIVACY.md参照。
+     Analytics SDKは使わない（アクセス解析をしない方針のため、measurementIdはconfigに含めていない） -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
+  import { getAuth, signInAnonymously, onAuthStateChanged }
+    from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
+  import { getFirestore, doc, setDoc, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+  import { getMessaging, getToken, onMessage }
+    from "https://www.gstatic.com/firebasejs/12.15.0/firebase-messaging.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCXu20j-IzQ1I30SntQGC6u6GUMfjvcTiU",
+    authDomain: "kyo-yaru.firebaseapp.com",
+    projectId: "kyo-yaru",
+    storageBucket: "kyo-yaru.firebasestorage.app",
+    messagingSenderId: "1019265854530",
+    appId: "1:1019265854530:web:551344d1cac088cdaa91db",
+  };
+  const VAPID_KEY = "BMnQdMEZnqhsEJt2kAQqwb9Z_xT_wWwISs3xsknstH-leGjju8bx9uI-bK-uCKVI0NAL05036cdqOjlBzYFtMXI";
+
+  const fbApp = initializeApp(firebaseConfig);
+  const auth = getAuth(fbApp);
+  const db = getFirestore(fbApp);
+  let messaging = null;
+  try { messaging = getMessaging(fbApp); } catch (e) { console.warn("この環境は通知に非対応です", e); }
+
+  let currentUid = null;
+  onAuthStateChanged(auth, (user) => { if (user) currentUid = user.uid; });
+
+  function ensureSignedIn() {
+    if (currentUid) return Promise.resolve(currentUid);
+    return new Promise((resolve, reject) => {
+      signInAnonymously(auth).catch(reject);
+      const unsub = onAuthStateChanged(auth, (user) => {
+        if (user) { currentUid = user.uid; unsub(); resolve(user.uid); }
+      });
+    });
+  }
+
+  // todayKey() / allPendingTodayCount() はメインの<script>（非module）で定義済みのグローバル関数を利用
+  function todayPendingSnapshot() {
+    return { count: allPendingTodayCount(), dateStr: todayKey() };
+  }
+
+  async function syncPendingCount() {
+    if (localStorage.getItem("kyouyaru.notifyEnabled") !== "1") return;
+    try {
+      const uid = await ensureSignedIn();
+      const { count, dateStr } = todayPendingSnapshot();
+      await setDoc(doc(db, "devices", uid), {
+        pendingCount: count,
+        pendingCountDate: dateStr,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+    } catch (err) {
+      console.warn("件数同期に失敗しました", err);
+    }
+  }
+  window.__notifySync = syncPendingCount;
+
+  window.__fcmEnable = async function () {
+    if (!messaging) return false;
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") return false;
+    try {
+      const swRegistration = await navigator.serviceWorker.register("./sw.js");
+      const token = await getToken(messaging, { vapidKey: VAPID_KEY, serviceWorkerRegistration: swRegistration });
+      if (!token) return false;
+      const uid = await ensureSignedIn();
+      const { count, dateStr } = todayPendingSnapshot();
+      await setDoc(doc(db, "devices", uid), {
+        fcmToken: token,
+        notifyEnabled: true,
+        pendingCount: count,
+        pendingCountDate: dateStr,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+      localStorage.setItem("kyouyaru.notifyEnabled", "1");
+      return true;
+    } catch (err) {
+      console.error("通知の設定に失敗しました", err);
+      return false;
+    }
+  };
+
+  window.__fcmDisable = async function () {
+    localStorage.setItem("kyouyaru.notifyEnabled", "0");
+    try {
+      const uid = await ensureSignedIn();
+      await setDoc(doc(db, "devices", uid), { notifyEnabled: false }, { merge: true });
+    } catch (err) { console.warn("通知オフの同期に失敗しました", err); }
+    return true;
+  };
+
+  window.addEventListener("load", () => { syncPendingCount(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") syncPendingCount();
+  });
+
+  // アプリを開いて見ている最中に通知が届いた場合（OSは自動表示しないため、ここで受け取るだけ）
+  if (messaging) {
+    onMessage(messaging, (payload) => {
+      console.log("フォアグラウンドで通知受信:", payload);
+    });
+  }
 </script>
 </body>
 </html>
