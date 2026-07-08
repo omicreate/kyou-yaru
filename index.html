@@ -1370,14 +1370,8 @@ function renderAllView() {
     const e = el("div", "empty");
     e.appendChild(el("div", "big", "ようこそ、きょうやる へ"));
     e.appendChild(el("div", "", "タスクをためこまず、「今日やる」と決めたものに集中するアプリです。まずはひとつ追加してみましょう。"));
-    const btn = el("button", "action", "サンプルを追加");
-    btn.addEventListener("click", () => {
-      addTask("きょうやる を触ってみる", { today: true, tags: ["さいしょ"] });
-      addTask("明日の予定をひとつ決める", { due: keyOffset(todayKey(), 1), priority: 2 });
-      addTask("完了チェックの気持ちよさを味わう", { today: true, tags: ["さいしょ"] });
-      toast("サンプルを3件追加しました");
-      renderAll();
-    });
+    const btn = el("button", "action", "さっそく追加する");
+    btn.addEventListener("click", () => $("#quickInput")?.focus({ preventScroll: true }));
     e.appendChild(btn);
     host.appendChild(e);
     return;

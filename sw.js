@@ -35,7 +35,7 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
-const CACHE_NAME = "kyou-yaru-v1.6.0";
+const CACHE_NAME = "kyou-yaru-v1.6.1";
 const ASSETS = [
   "./",
   "index.html",
